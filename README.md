@@ -1,105 +1,80 @@
 # kev-brief
 
-A public page listing the security vulnerabilities the US government has most
-recently confirmed are being exploited: every entry added to
+**Live site: [kev-brief.vercel.app](https://kev-brief.vercel.app)**
+
+A single page listing the vulnerabilities the US government has most recently
+confirmed are being exploited: every entry added to
 [CISA's Known Exploited Vulnerabilities (KEV) catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)
-in the last 14 days, newest first, with vendor, product, date added and
+in the last 14 days, newest first, with vendor, product, CVE, date added and
 whether ransomware use is known.
 
-Each entry has an **Explain** button that fetches a three-sentence,
-plain-language explanation written by Claude: what the product is, what an
-attacker can do, and who should care.
+Each entry has an **Explain** button that shows a three-sentence,
+plain-language summary written by Claude: what the product is, what an
+attacker can do with the flaw, and who should care.
 
-## Why this setup
+## How it works
 
-The page needs two things beyond static hosting: a server-side function that
-fetches the KEV feed and caches it, and one that asks Claude to explain an
-entry. So the project is **two Vercel Functions in `api/` with no framework and
-two dependencies** (the Anthropic SDK and the Vercel Blob SDK).
+Two Vercel Functions, no framework, no build step, two dependencies
+(`@anthropic-ai/sdk` and `@vercel/blob`).
 
-- **No framework.** Next.js, Astro or SvelteKit would all work, but they bring a
-  build step, a dependency tree and a router to serve one page. Vercel runs any
-  file in `api/` as a Node.js function with zero configuration, so that is all
-  this needs. `vercel.json` has one rewrite so the page is served at `/`.
-- **Server-rendered HTML.** The function returns the finished page. The only
-  client JavaScript is a small inline script for the Explain buttons; the
-  browser never fetches anything from CISA.
-- **Two dependencies.** Node's built-in `fetch`, `Request`/`Response` and test
-  runner (`node --test`) cover everything except calling Claude
-  (`@anthropic-ai/sdk`) and saving its answers (`@vercel/blob`).
+| Route | Function | What it does |
+| --- | --- | --- |
+| `/` (rewritten to `/api`) | `api/index.js` | Fetches the KEV feed and returns the finished HTML page |
+| `/api/explain?cve=CVE-YYYY-NNNN` | `api/explain.js` | Returns `{ "cveID": "...", "sentences": [product, attacker, audience] }` |
 
-### Caching
+The page is rendered on the server. The only client JavaScript is a small
+inline script for the Explain buttons, and the browser never talks to CISA.
 
-The feed is cached for 3 hours in two layers:
+### The feed
 
-1. **Vercel's CDN.** Responses carry
-   `Cache-Control: public, max-age=0, s-maxage=10800, stale-while-revalidate=3600`,
-   so most visitors get a cached page without the function running at all, and
-   after 3 hours the CDN serves the old copy while refreshing in the background.
-2. **In memory in the function.** Warm function instances keep the parsed feed
-   for 3 hours, so a CDN miss (new region, new deployment) usually doesn't need
-   a new download of the ~2 MB feed.
-
-If CISA is unreachable and an in-memory copy exists, the older copy is shown
-and cached by the CDN for only 5 minutes. With no copy at all the page returns
-a 502 that is never cached.
+- **Window:** KEV's `dateAdded` is a date with no time, so "last 14 days"
+  means 14 calendar days in UTC including today. On 2026-11-14 the page shows
+  entries dated 2026-11-01 through 2026-11-14.
+- **Caching:** the CDN keeps the page for 3 hours
+  (`s-maxage=10800, stale-while-revalidate=3600`), and warm function
+  instances keep the parsed ~2 MB feed in memory for 3 hours.
+- **If CISA is down:** an older in-memory copy is served and cached for only
+  5 minutes. With no copy at all the page returns an uncached 502.
 
 ### Explanations
 
-`GET /api/explain?cve=CVE-YYYY-NNNN` returns
-`{ "cveID": "...", "sentences": [product, attacker, audience] }`.
-
-- The browser sends only a CVE ID. The server looks the CVE up in the KEV
-  feed (404 if it isn't there) and gives Claude only CISA's own fields for it
-  (vendor, product, vulnerability name, description, ransomware use), so the
-  endpoint can't be used to ask Claude arbitrary questions.
-- Claude returns structured JSON with exactly one sentence per field. The
-  system prompt asks for outcomes, not exploitation detail. The request opts
-  into server-side refusal fallbacks, so if a safety classifier declines, the
-  API retries on a fallback model instead of failing.
-- Each explanation is paid for once per CVE. Answers are saved in a
+- The browser sends only a CVE ID. The server looks it up in the KEV feed and
+  gives Claude only CISA's fields for that entry (vendor, product, name,
+  description, ransomware use). A CVE that isn't in the catalog gets a 404, so
+  the endpoint can't be used to ask Claude arbitrary questions.
+- Claude returns structured JSON, one sentence per field. The system prompt
+  asks for outcomes, not exploitation steps.
+- Each CVE is paid for once. Answers are saved in a private
   [Vercel Blob](https://vercel.com/docs/vercel-blob) store
-  (`explanations/CVE-….json`), which every function instance shares and which
-  survives redeploys. A request checks memory, then Blob, and only then calls
-  Claude. If Blob can't be read, the request fails rather than risk paying
-  twice.
-- Each CVE has one URL. Any other form (lower case, spaces, extra
-  parameters) is redirected to `/api/explain?cve=CVE-…`, so the CDN keeps one
-  copy per CVE for a week
-  (`Cache-Control: public, max-age=0, s-maxage=604800, stale-while-revalidate=86400`).
-- Failures are not stored. The same instance repeats a failure for a minute
-  before trying again, so clicking a failing entry over and over doesn't cost
-  extra.
-- Two instances that miss the same CVE at the same moment can each call
-  Claude once. That's the only way an entry costs more than one call.
-- Each call to Claude times out after 20 seconds and is retried once. The
-  function may run for 60 seconds (`vercel.json`). The browser stops waiting
-  after 65 seconds. Every failure shows a message under the row and a
-  **Retry** button: timeouts, an unreachable server, a 504 from the platform,
-  and errors from the feed or Claude.
-- Explanations need `ANTHROPIC_API_KEY`, and on Vercel also a connected Blob
-  store. Without them the page still works; Explain shows an error and the
-  endpoint returns 503.
+  (`explanations/CVE-….json`) that all instances share and that survives
+  redeploys. A request checks memory, then Blob, then Claude. If Blob can't be
+  read, the request fails rather than risk paying twice.
+- Each CVE has one URL. Other spellings (lower case, extra parameters) are
+  redirected to `/api/explain?cve=CVE-…`, which the CDN caches for a week.
+- Failures aren't stored. An instance repeats a failure for a minute before
+  trying again. Claude calls time out after 20 seconds and are retried once;
+  the function may run for 60 seconds and the browser gives up at 65, then
+  offers **Retry**.
+- Without `ANTHROPIC_API_KEY` (and, on Vercel, a connected Blob store) the
+  page still works and the endpoint returns 503.
 
-### "Last 14 days"
+## Security and abuse limits
 
-KEV's `dateAdded` is a calendar date with no time, so the window is 14 calendar
-days in UTC including today: on 2026-11-14 the page shows entries dated
-2026-11-01 through 2026-11-14.
-
-## Layout
-
-| Path | Purpose |
-| --- | --- |
-| `api/index.js` | The page's Vercel Function entry point (Web `fetch` handler) |
-| `api/explain.js` | The Explain endpoint's Vercel Function entry point |
-| `lib/kev.js` | Fetching and caching the feed, filtering, HTML rendering, the Explain button script |
-| `lib/explain.js` | Prompt, Claude call, timeouts and caching for explanations |
-| `lib/store.js` | Saving explanations in Vercel Blob (or memory, locally) |
-| `lib/handler.js` | Turns requests into responses, sets cache headers |
-| `test/kev.test.js`, `test/explain.test.js` | Tests |
-| `test/fixtures/kev-sample.json` | A saved copy of the real feed (catalog 2026.11.13, entries since 2026-07-01) |
-| `.github/workflows/test.yml` | Runs the tests on every pull request and on pushes to `main` |
+- **Secrets:** none are in the repository or its history. The API key and
+  Blob credentials live only in the Vercel project's environment variables.
+- **Output:** all feed fields are HTML-escaped, and explanations are inserted
+  with `textContent`, never as HTML.
+- **Cost ceiling:** any CVE in the full catalog can be explained, not just
+  those on the page. Someone requesting every one would cause roughly one
+  Claude call per catalog entry (about 1,500), once; after that every answer
+  is served from Blob or the CDN.
+- **Known gaps:**
+  - Two instances that miss the same CVE at the same moment can each call
+    Claude, so a burst of parallel requests for an uncached CVE can cost more
+    than one call.
+  - There is no rate limit. Requests that skip the CDN (invalid IDs, a
+    trailing slash on the path) still run the function, though they never
+    reach Claude. A rate-limit rule in the Vercel Firewall would cap this.
 
 ## Running locally
 
@@ -115,13 +90,13 @@ npm test
 npx vercel dev
 ```
 
-`KEV_FEED_URL` overrides the feed location, for example to use CISA's GitHub
-mirror (`https://raw.githubusercontent.com/cisagov/kev-data/main/known_exploited_vulnerabilities.json`).
-`ANTHROPIC_API_KEY` enables the Explain buttons, and `KEV_EXPLAIN_MODEL`
-overrides the Claude model (default `claude-opus-5-5`). Locally, explanations
-are kept in memory unless `BLOB_READ_WRITE_TOKEN` is set. `KEV_BLOB_ACCESS`
-must match the Blob store's access setting (`private`, the default, or
-`public`).
+| Variable | Purpose |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | Enables Explain |
+| `KEV_EXPLAIN_MODEL` | Claude model (default `claude-opus-5-5`) |
+| `KEV_FEED_URL` | Feed location, e.g. CISA's GitHub mirror `https://raw.githubusercontent.com/cisagov/kev-data/main/known_exploited_vulnerabilities.json` |
+| `BLOB_READ_WRITE_TOKEN` | Use Blob locally; otherwise explanations are kept in memory |
+| `KEV_BLOB_ACCESS` | Must match the store's access setting: `private` (default) or `public` |
 
 ## Deploying
 
@@ -129,18 +104,32 @@ must match the Blob store's access setting (`private`, the default, or
    needed.
 2. Set `ANTHROPIC_API_KEY` in the project's environment variables.
 3. Create a **private** Blob store (Storage → Create → Blob) and connect it to
-   the project. That sets the store's credentials for the functions. Explain
-   stays off on Vercel until a store is connected.
+   the project. Explain stays off on Vercel until a store is connected.
+
+## Layout
+
+| Path | Purpose |
+| --- | --- |
+| `api/index.js`, `api/explain.js` | Function entry points |
+| `lib/kev.js` | Fetching and caching the feed, the 14-day filter, HTML rendering, the Explain button script |
+| `lib/explain.js` | Prompt, Claude call, timeouts, in-memory cache and failure cooldown |
+| `lib/store.js` | Saving explanations in Vercel Blob (or memory, locally) |
+| `lib/handler.js` | Requests to responses, validation, redirects, cache headers |
+| `test/` | Tests and a saved sample of the real feed (catalog 2026.11.13, entries since 2026-07-01) |
+| `.github/workflows/test.yml` | Runs the tests on pull requests and pushes to `main` |
 
 ## Tests
 
-The tests never touch the network. They run against the saved sample of the
-feed, a fake `fetch`, a fake Claude client and a fake Blob store. They cover
-the Explain endpoint (input validation, redirects to the standard URL, unknown
-CVEs, missing configuration, errors, timeouts, the stored and in-memory caches,
-the failure cooldown, refusals, escaping), and the 14-day window and its edges, newest-first
-ordering, the ransomware flag, HTML escaping, the empty state, cache expiry,
-falling back to a stale copy, and the response headers.
+```bash
+npm test
+```
 
-To refresh the sample, download the feed and keep recent entries; tests that
-depend on specific dates pass `now` explicitly, so update those dates too.
+The tests never touch the network: they use the saved feed sample, a fake
+`fetch`, a fake Claude client and a fake Blob store. They cover the 14-day
+window and its edges, ordering, escaping, cache expiry and stale fallback,
+response headers, and for Explain: input validation, redirects, unknown CVEs,
+missing configuration, timeouts, refusals, both caches and the failure
+cooldown.
+
+To refresh the sample, download the feed and keep recent entries. Tests that
+depend on dates pass `now` explicitly, so update those dates too.
