@@ -178,6 +178,7 @@ function explainHandler(overrides = {}) {
     loadCatalog: async () => ({ catalog: sample }),
     explain: async () => [ANSWER.product, ANSWER.attackerImpact, ANSWER.audience],
     configured: () => true,
+    now: () => new Date('2026-11-14T12:00:00Z'),
     ...overrides,
   });
 }
@@ -214,6 +215,34 @@ test('explain endpoint rejects bad input, unknown CVEs and missing configuration
   assert.equal((await handler(new Request(`https://example.test/api/explain?cve=${CVE}`, { method: 'POST' }))).status, 405);
   assert.equal((await get(explainHandler({ configured: () => false }), `?cve=${CVE}`)).status, 503);
   assert.equal(called, false);
+});
+
+test('explain endpoint only explains CVEs from the last 14 days, plus one day of grace', async () => {
+  let calls = 0;
+  const catalog = {
+    vulnerabilities: [
+      { cveID: 'CVE-2026-0001', dateAdded: '2026-11-14' }, // today
+      { cveID: 'CVE-2026-0002', dateAdded: '2026-11-01' }, // first day on the page
+      { cveID: 'CVE-2026-0003', dateAdded: '2026-10-31' }, // grace day for a stale page
+      { cveID: 'CVE-2026-0004', dateAdded: '2026-10-30' }, // too old
+      { cveID: 'CVE-2021-44228', dateAdded: '2021-12-10' }, // long gone
+      { cveID: 'CVE-2026-0005', dateAdded: '2026-11-15' }, // future, never shown
+    ],
+  };
+  const handler = explainHandler({
+    loadCatalog: async () => ({ catalog }),
+    explain: async () => { calls += 1; return ['a', 'b', 'c']; },
+  });
+  for (const id of ['CVE-2026-0001', 'CVE-2026-0002', 'CVE-2026-0003']) {
+    assert.equal((await get(handler, `?cve=${id}`)).status, 200, id);
+  }
+  for (const id of ['CVE-2026-0004', 'CVE-2021-44228', 'CVE-2026-0005']) {
+    const res = await get(handler, `?cve=${id}`);
+    assert.equal(res.status, 404, id);
+    assert.match((await res.json()).error, /last 14 days/);
+    assert.match(res.headers.get('cache-control'), /s-maxage=300/);
+  }
+  assert.equal(calls, 3);
 });
 
 test('explain endpoint returns an uncached 502 when Claude or the feed fails', async () => {

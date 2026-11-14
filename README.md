@@ -40,8 +40,11 @@ inline script for the Explain buttons, and the browser never talks to CISA.
 
 - The browser sends only a CVE ID. The server looks it up in the KEV feed and
   gives Claude only CISA's fields for that entry (vendor, product, name,
-  description, ransomware use). A CVE that isn't in the catalog gets a 404, so
-  the endpoint can't be used to ask Claude arbitrary questions.
+  description, ransomware use), so the endpoint can't be used to ask Claude
+  arbitrary questions.
+- Only CVEs added in the last 14 days are explained, plus one extra day so
+  buttons on a page the CDN rendered yesterday still work. Anything else,
+  including CVEs not in the catalog, gets a 404.
 - Claude returns structured JSON, one sentence per field. The system prompt
   asks for outcomes, not exploitation steps.
 - Each CVE is paid for once. Answers are saved in a private
@@ -64,10 +67,10 @@ inline script for the Explain buttons, and the browser never talks to CISA.
   Blob credentials live only in the Vercel project's environment variables.
 - **Output:** all feed fields are HTML-escaped, and explanations are inserted
   with `textContent`, never as HTML.
-- **Cost ceiling:** any CVE in the full catalog can be explained, not just
-  those on the page. Someone requesting every one would cause roughly one
-  Claude call per catalog entry (about 1,500), once; after that every answer
-  is served from Blob or the CDN.
+- **Cost ceiling:** only CVEs from the last 15 days can be explained, so
+  even someone requesting every one causes at most one Claude call per recent
+  entry (typically a few dozen). After that every answer is served from Blob
+  or the CDN.
 - **Known gaps:**
   - Two instances that miss the same CVE at the same moment can each call
     Claude, so a burst of parallel requests for an uncached CVE can cost more
