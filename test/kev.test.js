@@ -54,7 +54,9 @@ test('tolerates a catalog without a vulnerabilities array', () => {
 test('renders a row per entry with escaped text', () => {
   const entries = recentEntries(sample, { now: NOW });
   const html = renderPage({ entries, catalogVersion: sample.catalogVersion, fetchedAt: NOW.getTime(), now: NOW });
-  assert.equal(html.match(/<tr>/g).length, entries.length + 1); // + header row
+  assert.equal(html.match(/<tr data-cve=/g).length, entries.length);
+  assert.equal(html.match(/<button type="button" class="explain"/g).length, entries.length);
+  assert.match(html, /<script>/);
   assert.match(html, /UnrealIRCd/);
   assert.match(html, /2026\.11\.13/);
   assert.match(html, /15 entries/);
@@ -74,6 +76,7 @@ test('renders an empty state when nothing was added', () => {
   const html = renderPage({ entries: [], fetchedAt: 0, now: NOW });
   assert.match(html, /No vulnerabilities were added/);
   assert.ok(!html.includes('<table>'));
+  assert.ok(!html.includes('<script>'));
 });
 
 test('loader caches the feed for the TTL, then refetches', async () => {
